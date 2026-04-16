@@ -1,0 +1,174 @@
+name: Pipeline Integration Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Test strategy:
+# We spin up DocumentDB + ClickHouse in Docker, seed DocumentDB via the .NET API,
+# load synthetic Airbyte output into ClickHouse raw tables (simulating what Airbyte
+# does in production), then run dbt build and validate the analytical output.
+#
+# This tests the entire transform layer end-to-end without needing Airbyte itself
+# (which is too heavy for CI). The Airbyte sync is the part managed by Terraform
+# and tested via terraform validate.
+
+jobs:
+  pipeline-test:
+    name: End-to-End Pipeline Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        ports:
+          - 8123:8123
+          - 9000:9000
+        env:
+          CLICKHOUSE_DB: analytics
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: clickhouse
+        options: >-
+          --health-cmd "clickhouse-client --password clickhouse --query 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      documentdb:
+        image: ghcr.io/microsoft/documentdb/documentdb-local:latest
+        ports:
+          - 10260:10260
+        options: >-
+          --health-cmd "mongosh --port 10260 -u docdbadmin -p Passw0rd! --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        # Note: command args passed via the image entrypoint
+        env:
+          DOCUMENTDB_USERNAME: docdbadmin
+          DOCUMENTDB_PASSWORD: "Passw0rd!"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ----- Seed DocumentDB via the .NET API -----
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Start Orders API (seeds DocumentDB)
+        run: |
+          cd src/OrdersApi
+          dotnet run &
+          sleep 10
+        env:
+          DocumentDb__ConnectionString: "mongodb://docdbadmin:Passw0rd!@localhost:10260/?authMechanism=SCRAM-SHA-256"
+          DocumentDb__DatabaseName: ecommerce
+          ASPNETCORE_URLS: "http://+:5100"
+
+      - name: Verify seed data
+        run: |
+          curl -sf http://localhost:5100/api/orders?limit=5 | jq '.[:2]'
+          curl -sf http://localhost:5100/api/customers?limit=5 | jq '.[:2]'
+          curl -sf http://localhost:5100/api/orders/revenue/daily?days=90 | jq '.[:3]'
+          echo "Seed data verified."
+
+      # ----- Initialize ClickHouse -----
+      - name: Create ClickHouse databases
+        run: |
+          clickhouse-client --host localhost --password clickhouse \
+            --query "CREATE DATABASE IF NOT EXISTS raw"
+          clickhouse-client --host localhost --password clickhouse \
+            --query "CREATE DATABASE IF NOT EXISTS staging"
+          clickhouse-client --host localhost --password clickhouse \
+            --query "CREATE DATABASE IF NOT EXISTS intermediate"
+          clickhouse-client --host localhost --password clickhouse \
+            --query "CREATE DATABASE IF NOT EXISTS analytics"
+
+      # ----- Load test data into ClickHouse raw (simulates Airbyte) -----
+      - name: Load synthetic Airbyte output
+        run: |
+          clickhouse-client --host localhost --password clickhouse \
+            --queries-file scripts/testdata/create-raw-tables.sql
+          clickhouse-client --host localhost --password clickhouse \
+            --queries-file scripts/testdata/seed-raw-orders.sql
+          clickhouse-client --host localhost --password clickhouse \
+            --queries-file scripts/testdata/seed-raw-customers.sql
+          clickhouse-client --host localhost --password clickhouse \
+            --queries-file scripts/testdata/seed-raw-crypto-prices.sql
+
+      - name: Verify raw data loaded
+        run: |
+          echo "Orders:"
+          clickhouse-client --host localhost --password clickhouse \
+            --query "SELECT count() FROM raw.orders"
+          echo "Customers:"
+          clickhouse-client --host localhost --password clickhouse \
+            --query "SELECT count() FROM raw.customers"
+          echo "Crypto prices:"
+          clickhouse-client --host localhost --password clickhouse \
+            --query "SELECT count() FROM raw.coingecko_prices"
+
+      # ----- Run dbt -----
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dbt
+        run: pip install dbt-core dbt-clickhouse
+
+      - name: dbt deps
+        working-directory: dbt
+        run: dbt deps
+
+      - name: dbt build (models + tests)
+        working-directory: dbt
+        run: dbt build --profiles-dir . --target dev
+        env:
+          CLICKHOUSE_HOST: localhost
+          CLICKHOUSE_PORT: "8123"
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: clickhouse
+
+      # ----- Validate analytical output -----
+      - name: Validate mart tables
+        run: |
+          echo "=== fct_order_lines ==="
+          clickhouse-client --host localhost --password clickhouse \
+            --query "SELECT count() as rows, round(sum(line_total_usd), 2) as total_usd FROM analytics.fct_order_lines WHERE order_status = 'completed'"
+
+          echo "=== dim_customers ==="
+          clickhouse-client --host localhost --password clickhouse \
+            --query "SELECT count() as customers, round(sum(lifetime_value_usd), 2) as total_ltv FROM analytics.dim_customers"
+
+          echo "=== fct_daily_revenue ==="
+          clickhouse-client --host localhost --password clickhouse \
+            --query "SELECT count() as date_currency_pairs, round(sum(revenue_usd), 2) as total_revenue_usd FROM analytics.fct_daily_revenue"
+
+          echo "=== Crypto enrichment check ==="
+          clickhouse-client --host localhost --password clickhouse \
+            --query "SELECT currency, count() as lines, round(avg(line_total_usd), 2) as avg_usd FROM analytics.fct_order_lines WHERE currency IN ('BTC', 'ETH') GROUP BY currency"
+
+      - name: Validate no duplicates
+        run: |
+          DUPES=$(clickhouse-client --host localhost --password clickhouse \
+            --query "SELECT count() FROM (SELECT order_id, sku, count() as c FROM analytics.fct_order_lines GROUP BY order_id, sku HAVING c > 1)")
+          if [ "$DUPES" -gt 0 ]; then
+            echo "FAIL: Found $DUPES duplicate order items!"
+            exit 1
+          fi
+          echo "PASS: No duplicate order items found."
+
+      - name: Validate all USD amounts are positive for completed orders
+        run: |
+          BAD=$(clickhouse-client --host localhost --password clickhouse \
+            --query "SELECT count() FROM analytics.fct_order_lines WHERE order_status = 'completed' AND line_total_usd <= 0")
+          if [ "$BAD" -gt 0 ]; then
+            echo "FAIL: Found $BAD completed order lines with non-positive USD amounts!"
+            exit 1
+          fi
+          echo "PASS: All completed order lines have positive USD amounts."

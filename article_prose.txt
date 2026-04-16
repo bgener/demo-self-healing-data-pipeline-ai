@@ -1,0 +1,274 @@
+Build a Production ELT Pipeline with Airbyte, dbt, and Dagster
+
+Your e-commerce app runs on Microsoft DocumentDB. Orders come in as nested JSON documents with line items, shipping info, and payments in five currencies including Bitcoin and Ethereum. Leadership wants hourly analytics dashboards. The current approach: a Python script that a senior engineer wrote two years ago, running on a cron job, breaking every time someone adds a field to the order schema.
+
+You could rewrite that script. Or you could build a pipeline where every piece is a separate, testable, replaceable component: extraction, loading, transformation, orchestration. Where schema changes propagate automatically. Where you know exactly how fresh your data is and get alerted when it goes stale. Where the entire configuration lives in version control and deploys through Terraform.
+
+That is what we are building. A complete ELT pipeline that pulls data from two sources (a NoSQL database and a REST API), loads it into a columnar analytics engine, transforms and enriches it with SQL, and orchestrates the whole thing with freshness guarantees. Everything runs locally in Docker. Everything is tested in CI.
+
+---
+
+ What Is the Modern ELT Stack?
+
+ETL (Extract, Transform, Load) dominated for decades. You transformed data before loading it into the warehouse. The problem: every new business question meant a new transformation pipeline. The warehouse never had the raw data, so you could not go back and re-transform.
+
+ELT flips the order. Load the raw data first, then transform it inside the warehouse. The warehouse is cheap and fast enough to handle it. This gives you lineage, replayability, and the ability to add new transformations without re-extracting.
+
+The stack we are using splits each concern into a dedicated tool:
+
+ Tool  Role  Why this one 
+---------
+ **Airbyte**  Extract and load  300+ connectors, handles schema drift, open source 
+ **dbt**  Transform  SQL-based, version-controlled, built-in testing and docs 
+ **Dagster**  Orchestrate  Asset-based (not task-based), freshness policies, observability 
+ **Terraform**  Configure  Airbyte connections as code, no manual UI clicking 
+ **ClickHouse**  Store and query  Columnar, fast analytical queries, handles nested JSON 
+
+Compare this to the alternatives:
+
+ Approach  Pros  Cons 
+---------
+ Custom scripts (Python/C)  Full control  No lineage, no freshness, breaks on schema changes 
+ SSIS  Mature, enterprise  Windows-only, XML configs, painful to version-control 
+ Azure Data Factory  Managed, scalable  Vendor lock-in, expensive at scale, GUI-driven 
+ Airflow + custom operators  Flexible  Task-based (not asset-based), DAG complexity grows fast 
+ **Airbyte + dbt + Dagster**  **Modular, testable, open source**  **More moving parts to set up initially** 
+
+The trade-off is real: more components means more setup. But each component is replaceable. Outgrow Airbyte? Swap it for Fivetran. Prefer Snowflake over ClickHouse? Change the dbt adapter. The interfaces between components are stable.
+
+---
+
+ The Demo Scenario
+
+We have an e-commerce platform backed by Microsoft DocumentDB, the open-source engine behind Azure Cosmos DB's vCore offering. It speaks the MongoDB wire protocol, runs in a single Docker container, and supports the aggregation pipeline. For this demo, it is our production database.
+
+The data model uses nested documents. Each order contains an array of line items and a shipping object:
+
+Two data sources feed the pipeline:
+
+**Source 1: DocumentDB** with 500 orders across 50 customers. About 20% of orders are paid in BTC or ETH. The .NET API that serves the app also runs a MongoDB aggregation pipeline (, , ) for a daily revenue endpoint. This matters because it shows the source database is not just a dumb data store. The ELT pipeline complements what the source already does.
+
+**Source 2: CoinGecko REST API** providing real-time BTC and ETH prices in USD. We need this to convert crypto orders into a common currency for analytics.
+
+**Destination: ClickHouse**, a columnar database that runs analytical queries orders of magnitude faster than a document store. Airbyte loads raw data here. dbt transforms it into clean analytical tables.
+
+The architecture:
+
+---
+
+ Setting Up the Project
+
+ Prerequisites
+
+- Docker Desktop (Docker Compose v2)
+- Terraform (= 1.0)
+- Task runner (optional, via taskfile.dev)
+
+ Docker Compose: all services in one file
+
+The  defines five services. DocumentDB runs on port 10260, ClickHouse on 8123, Airbyte on 8000, and Dagster on 3000. The Orders API builds from a Dockerfile and seeds DocumentDB on startup:
+
+One command brings everything up:
+
+ The .NET API: seeding DocumentDB
+
+The Orders API is not part of the pipeline. It represents the app that already exists. On startup, it populates DocumentDB with 50 customers and 500 orders, then exposes three endpoints:
+
+The interesting part is the seed data. Orders span five currencies (USD, EUR, GBP, BTC, ETH) with weighted distribution. Crypto orders use fractional prices (0.0035 BTC) instead of dollar amounts. This makes the enrichment step meaningful: without CoinGecko prices, you cannot compare a $149 gadget sale to a 0.0035 BTC gadget sale.
+
+---
+
+ DocumentDB Aggregations: What the Source Already Does
+
+Before we build the pipeline, look at what the source database can do on its own. The  endpoint runs a MongoDB aggregation pipeline directly on DocumentDB:
+
+This works. It gives you daily revenue grouped by currency. But it has three limitations that the ELT pipeline solves:
+
+1. **No cross-source enrichment.** The aggregation cannot join with CoinGecko prices to convert BTC revenue to USD. The database only sees its own data.
+2. **No deduplication across syncs.** If you run this query at different times, you get different results. There is no concept of "the latest version of each record."
+3. **Wrong tool for dashboards.** DocumentDB is optimized for transactional workloads. Running heavy aggregations against it competes with production traffic. ClickHouse handles analytical queries without touching the source.
+
+The pipeline does not replace the aggregation. It complements it by adding what a single database cannot do alone.
+
+---
+
+ Configuring Airbyte with Terraform
+
+Airbyte extracts data from sources and loads it into destinations. Most tutorials show you clicking through the Airbyte UI to create connections. That works for a demo, but connections configured through a UI are not version-controlled, not reviewable, and not reproducible. A new environment means clicking through the same forms again.
+
+We use the Airbyte Terraform provider instead:
+
+ DocumentDB source (MongoDB connector)
+
+DocumentDB speaks the MongoDB wire protocol, so Airbyte's MongoDB connector works out of the box. No special driver, no adapter. The same connector that works with MongoDB Atlas or a self-hosted MongoDB instance works here.
+
+ CoinGecko source (HTTP connector)
+
+CoinGecko's free tier needs no API key. The HTTP connector pulls BTC and ETH prices in USD every 15 minutes.
+
+ Connections with sync schedules
+
+Orders sync hourly. Crypto prices sync every 15 minutes. Terraform outputs the connection IDs that Dagster needs:
+
+Three commands to configure everything:
+
+The full Airbyte config is now in Git. Review it in a PR. Roll it back with . Replicate it to a new environment with .
+
+---
+
+ dbt Models: Flatten, Deduplicate, Enrich
+
+dbt transforms the raw data Airbyte loaded into ClickHouse. The project follows the standard three-layer pattern: staging (clean), intermediate (business logic), marts (analytics-ready).
+
+ Staging: flatten nested documents
+
+Airbyte dumps DocumentDB documents into ClickHouse as raw JSON. The staging models parse this into relational columns.
+
+The core challenge is the nested  array. Each order can have 1 to 5 line items. We need one row per line item for analytics. ClickHouse's  with  handles this:
+
+One order with 3 items becomes 3 rows. Each row has the full order context (customer, currency, date) plus the item-level detail (SKU, quantity, unit price, line total).
+
+ Intermediate: deduplication
+
+Airbyte in append mode can produce duplicates. If a sync fails midway and retries, or if you trigger a manual re-sync, the same order appears multiple times in the raw table with different  timestamps.
+
+The dedup strategy:  partitioned by business key, ordered by extraction timestamp descending. Keep row number 1.
+
+This pattern works for any append-mode source. The business key changes per table ( +  for items,  for orders,  for customers), but the approach is identical.
+
+ Intermediate: data enrichment
+
+This is where the two sources meet. Orders paid in BTC or ETH need a USD conversion. We join with the latest CoinGecko price per currency:
+
+A 0.0035 BTC order at a BTC price of $68,100 becomes $238.35 USD. Fiat currencies use static rates (good enough for a demo; in production you would pull these from a forex API through another Airbyte connector).
+
+ Marts: analytics-ready tables
+
+The marts are straightforward aggregations on top of the enriched data:
+
+The  mart joins deduplicated customers with aggregated order metrics to compute lifetime value:
+
+ dbt tests: data quality as code
+
+Schema tests catch issues before they reach dashboards:
+
+Custom tests validate pipeline-specific invariants. This one fails if deduplication missed any rows:
+
+---
+
+ Dagster: Orchestration and Freshness Policies
+
+Dagster ties everything together. Unlike Airflow's task-based DAGs, Dagster thinks in **assets**: each dbt model and each Airbyte sync is an asset with a known state, a last-materialized timestamp, and optional freshness requirements.
+
+ Defining assets
+
+The  and  integrations map external resources to Dagster assets automatically:
+
+ Freshness policies
+
+The  on the DocumentDB assets means: if the orders data is older than 60 minutes, mark it as overdue. The Dagster UI shows a clear indicator: green for fresh, yellow for approaching the SLA, red for stale.
+
+Crypto prices have a tighter SLA: 15 minutes. If the CoinGecko sync fails or slows down, you see it immediately in the asset graph.
+
+ Scheduling
+
+A single hourly schedule triggers the full pipeline:
+
+Dagster handles the dependency graph. It runs Airbyte syncs first, then dbt models in the correct order (staging before intermediate before marts). If the Airbyte sync fails, the dbt models do not run. If a single dbt model fails, downstream models are skipped.
+
+---
+
+ Testing the Pipeline in CI
+
+The pipeline integration test is the most important piece. You need to know the transform layer works before merging a PR. But spinning up Airbyte in GitHub Actions is impractical: it is too heavy and too slow.
+
+The solution: **simulate Airbyte's output**. Load synthetic data directly into ClickHouse's raw tables, then test dbt end-to-end.
+
+ Test data design
+
+The synthetic data in  covers every edge case the pipeline handles:
+
+ GitHub Actions workflow
+
+The  workflow runs on every push and PR:
+
+Steps:
+
+1. Start DocumentDB + ClickHouse as GitHub Actions services
+2. Build and run the .NET API to seed DocumentDB
+3. Create ClickHouse raw tables and load synthetic data
+4. Run  (all models, schema tests, and custom tests)
+5. Validate mart output with SQL assertions:
+
+This tests the full transform layer (staging, dedup, enrichment, marts) against real databases, without Airbyte. The separation pays off: you can merge dbt changes with confidence even if Airbyte is being upgraded in a different PR.
+
+---
+
+ CI/CD and Quality Tooling
+
+The project includes three GitHub Actions workflows and a full suite of quality tools. This is what a production pipeline looks like when you treat it as a software project, not a collection of scripts.
+
+ The CI workflow
+
+Every push and PR runs:
+
+ Check  Tool  What it catches 
+---------
+ .NET build    Compilation errors in the seed API 
+ Terraform format    Inconsistent HCL formatting 
+ Terraform validate    Invalid syntax, missing variables 
+ Terraform lint  tflint  Naming violations, unused variables, deprecated syntax 
+ Security scan  Checkov  Hardcoded credentials, overly broad permissions 
+ dbt compile    Broken refs, invalid SQL syntax 
+ Dockerfile lint  hadolint  Base image pinning, unnecessary layers 
+
+ Cost estimation on PRs
+
+Every PR that changes  gets an Infracost breakdown. Two jobs run: a **cost breakdown** that prints the full table to the workflow log and uploads a report artifact, and a **cost diff** that compares the PR branch against main and posts the delta as a PR comment.
+
+If you add a new Airbyte connection that syncs every 5 minutes instead of every hour, the PR comment shows the cost impact before you merge.
+
+ Pre-commit hooks
+
+For local development, the  runs terraform fmt, validate, tflint, hadolint, sqlfluff (for dbt SQL), and standard checks (YAML validity, trailing whitespace, no direct commits to main):
+
+ Task runner
+
+All common operations are in a :
+
+---
+
+ Querying the Results
+
+After the pipeline runs, the analytical tables in ClickHouse are ready to query. Here are some examples that show what the pipeline enables:
+
+**Revenue breakdown by payment type (crypto vs fiat):**
+
+**Top customers by lifetime value:**
+
+**Daily revenue trend with USD normalization:**
+
+These queries run in milliseconds on ClickHouse. The same aggregations on DocumentDB would compete with production traffic and lack the cross-source enrichment (crypto pricing) that makes the USD comparison possible.
+
+---
+
+ What It Costs and How to Start
+
+**Open-source tier (this demo):** Everything runs locally in Docker for free. DocumentDB is MIT-licensed. ClickHouse, Airbyte OSS, dbt Core, and Dagster OSS are all free.
+
+**Managed tier (production):** If you want to skip the infrastructure management:
+
+ Service  Free tier  Paid 
+---------
+ Airbyte Cloud  14-day trial  From $2.50/credit 
+ dbt Cloud  1 developer free  From $100/month 
+ Dagster Cloud  30-day trial  From $0/month (serverless) 
+ ClickHouse Cloud  30-day trial  From $0.30/hour 
+
+**Start here:**
+
+1. Clone the repo and run 
+2. Open Dagster at localhost:3000, click Materialize All
+3. Query the results in ClickHouse
+4. Change a dbt model, push a PR, watch the CI pipeline validate it
+5. When ready for production, swap Docker services for managed equivalents. The dbt models, Dagster definitions, and Terraform configs carry over unchanged.

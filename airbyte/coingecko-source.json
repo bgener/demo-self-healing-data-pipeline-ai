@@ -1,0 +1,19 @@
+{
+  "name": "CoinGecko Prices",
+  "sourceDefinitionId": "dfd88b22-b603-4c3d-aad7-3701784586b1",
+  "connectionConfiguration": {
+    "url_base": "https://api.coingecko.com/api/v3",
+    "streams": [
+      {
+        "name": "coingecko_prices",
+        "url_path": "/coins/markets",
+        "http_method": "GET",
+        "request_parameters": {
+          "vs_currency": "usd",
+          "ids": "bitcoin,ethereum",
+          "order": "market_cap_desc"
+        }
+      }
+    ]
+  }
+}

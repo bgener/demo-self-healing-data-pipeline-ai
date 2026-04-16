@@ -1,0 +1,6 @@
+dagster>=1.9.0
+dagster-webserver>=1.9.0
+dagster-airbyte>=0.25.0
+dagster-dbt>=0.25.0
+dbt-core>=1.9.0
+dbt-clickhouse>=1.8.0

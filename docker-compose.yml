@@ -1,0 +1,128 @@
+services:
+  # =============================================================================
+  # Source: Microsoft DocumentDB (MongoDB-compatible)
+  # =============================================================================
+  documentdb:
+    image: ghcr.io/microsoft/documentdb/documentdb-local:latest
+    container_name: documentdb
+    ports:
+      - "10260:10260"
+    command: ["--username", "docdbadmin", "--password", "Passw0rd!"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "10260", "-u", "docdbadmin", "-p", "Passw0rd!", "--eval", "db.runCommand({ping:1}).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - elt-network
+
+  # =============================================================================
+  # Destination: ClickHouse (columnar analytics)
+  # =============================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: clickhouse
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9000:9000"   # Native TCP
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--password", "clickhouse", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - elt-network
+
+  # =============================================================================
+  # .NET Orders API (seeds DocumentDB)
+  # =============================================================================
+  orders-api:
+    build:
+      context: ./src/OrdersApi
+      dockerfile: Dockerfile
+    container_name: orders-api
+    ports:
+      - "5100:8080"
+    environment:
+      DocumentDb__ConnectionString: "mongodb://docdbadmin:Passw0rd!@documentdb:10260/?authMechanism=SCRAM-SHA-256"
+      DocumentDb__DatabaseName: "ecommerce"
+    depends_on:
+      documentdb:
+        condition: service_healthy
+    networks:
+      - elt-network
+
+  # =============================================================================
+  # Airbyte (OSS - data integration)
+  # =============================================================================
+  airbyte-server:
+    image: airbyte/airbyte:latest
+    container_name: airbyte
+    ports:
+      - "8000:8000"   # Airbyte webapp
+    volumes:
+      - airbyte-data:/tmp/workspace
+    environment:
+      - DATABASE_URL=
+    networks:
+      - elt-network
+
+  # =============================================================================
+  # Dagster (orchestration)
+  # =============================================================================
+  dagster-webserver:
+    build:
+      context: ./dagster
+      dockerfile: Dockerfile
+    container_name: dagster-webserver
+    command: dagster-webserver -h 0.0.0.0 -p 3000
+    ports:
+      - "3000:3000"
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      AIRBYTE_HOST: http://airbyte-server:8000
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      DBT_PROJECT_DIR: /opt/dagster/dbt
+    volumes:
+      - ./dagster/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml
+      - ./dbt:/opt/dagster/dbt
+    depends_on:
+      - clickhouse
+      - airbyte-server
+    networks:
+      - elt-network
+
+  dagster-daemon:
+    build:
+      context: ./dagster
+      dockerfile: Dockerfile
+    container_name: dagster-daemon
+    command: dagster-daemon run
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      AIRBYTE_HOST: http://airbyte-server:8000
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      DBT_PROJECT_DIR: /opt/dagster/dbt
+    volumes:
+      - ./dagster/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml
+      - ./dbt:/opt/dagster/dbt
+    depends_on:
+      - dagster-webserver
+    networks:
+      - elt-network
+
+volumes:
+  clickhouse-data:
+  airbyte-data:
+
+networks:
+  elt-network:
+    driver: bridge
