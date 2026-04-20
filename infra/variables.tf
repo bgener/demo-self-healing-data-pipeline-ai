@@ -1,55 +1,36 @@
-variable "airbyte_url" {
-  description = "Airbyte API URL"
+variable "pg_host" {
+  description = "TimescaleDB hostname"
   type        = string
-  default     = "http://localhost:8000"
+  default     = "localhost"
 }
 
-variable "documentdb_host" {
-  description = "DocumentDB hostname (use container name when running in Docker network)"
-  type        = string
-  default     = "documentdb"
-}
-
-variable "documentdb_port" {
-  description = "DocumentDB port"
+variable "pg_port" {
+  description = "TimescaleDB port"
   type        = number
-  default     = 10260
+  default     = 5432
 }
 
-variable "documentdb_username" {
-  description = "DocumentDB admin username"
+variable "pg_user" {
+  description = "TimescaleDB admin user"
   type        = string
-  default     = "docdbadmin"
+  default     = "pipeline"
 }
 
-variable "documentdb_password" {
-  description = "DocumentDB admin password"
+variable "pg_password" {
+  description = "TimescaleDB admin password"
   type        = string
   sensitive   = true
-  default     = "Passw0rd!"
+  default     = "pipeline"
 }
 
-variable "clickhouse_host" {
-  description = "ClickHouse hostname"
+variable "pg_database" {
+  description = "TimescaleDB database name"
   type        = string
-  default     = "clickhouse"
+  default     = "warehouse"
 }
 
-variable "clickhouse_port" {
-  description = "ClickHouse HTTP port"
-  type        = number
-  default     = 8123
-}
-
-variable "clickhouse_username" {
-  description = "ClickHouse username"
-  type        = string
-  default     = "default"
-}
-
-variable "clickhouse_password" {
-  description = "ClickHouse password"
-  type        = string
-  sensitive   = true
-  default     = "clickhouse"
+variable "pg_schemas" {
+  description = "Schemas to create in the warehouse"
+  type        = list(string)
+  default     = ["raw", "staging", "intermediate", "marts"]
 }

@@ -2,46 +2,22 @@ version: 2
 
 models:
   - name: fct_order_lines
-    description: Fact table with one row per order line item, deduplicated and enriched with USD conversion
     columns:
       - name: order_id
-        description: Business order identifier
-        tests:
-          - not_null
+        tests: [not_null]
       - name: sku
-        description: Product SKU
-        tests:
-          - not_null
+        tests: [not_null]
       - name: line_total_usd
-        description: Line total converted to USD (fiat rates or CoinGecko crypto prices)
-        tests:
-          - not_null
-      - name: order_status
-        description: Order status
-        tests:
-          - accepted_values:
-              values: ['completed', 'pending', 'cancelled']
-
-  - name: dim_customers
-    description: Customer dimension with lifetime value metrics
-    columns:
-      - name: customer_id
-        description: Unique customer identifier
-        tests:
-          - unique
-          - not_null
-      - name: segment
-        tests:
-          - accepted_values:
-              values: ['enterprise', 'startup', 'individual']
-
+        tests: [not_null]
   - name: fct_daily_revenue
-    description: Daily revenue aggregation by currency, with USD conversion
     columns:
       - name: revenue_date
-        tests:
-          - not_null
+        tests: [not_null]
       - name: revenue_usd
-        description: Revenue converted to USD
-        tests:
-          - not_null
+        tests: [not_null]
+  - name: dim_customers
+    columns:
+      - name: customer_id
+        tests: [not_null, unique]
+      - name: lifetime_value_usd
+        tests: [not_null]

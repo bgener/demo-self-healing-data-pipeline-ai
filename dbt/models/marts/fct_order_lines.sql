@@ -1,18 +1,14 @@
--- Mart: fact table for order line items.
--- Fully deduplicated, enriched with USD amounts, ready for analytics.
-
 select
     order_id,
     customer_id,
+    order_status,
+    currency,
+    created_at,
     sku,
     product_name,
     quantity,
     unit_price,
-    currency,
     line_total,
-    line_total_usd,
-    crypto_price_usd,
-    order_status,
-    created_at,
-    toDate(created_at) as order_date
+    usd_rate,
+    line_total_usd
 from {{ ref('int_order_items_enriched') }}

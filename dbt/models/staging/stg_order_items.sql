@@ -1,29 +1,13 @@
--- Staging: explode the nested items[] array into one row per line item.
--- This is the core "flatten" step for document-to-relational transformation.
-
-with source as (
-    select * from {{ source('airbyte_raw', 'orders') }}
-),
-
--- Use ClickHouse's JSONExtract + arrayJoin to flatten the items array
-flattened as (
-    select
-        orderId                                                     as order_id,
-        customerId                                                  as customer_id,
-        upper(currency)                                             as currency,
-        status                                                      as order_status,
-        toDateTime(createdAt)                                       as created_at,
-        JSONExtractString(item, 'sku')                              as sku,
-        JSONExtractString(item, 'productName')                      as product_name,
-        JSONExtractInt(item, 'qty')                                 as quantity,
-        JSONExtractFloat(item, 'unitPrice')                         as unit_price,
-        _airbyte_raw_id,
-        _airbyte_extracted_at
-    from source
-    array join JSONExtractArrayRaw(items) as item
-)
-
 select
-    *,
-    quantity * unit_price as line_total
-from flattened
+    orders.order_id,
+    orders.customer_id,
+    orders.order_status,
+    orders.currency,
+    orders.created_at,
+    item.value ->> 'sku' as sku,
+    item.value ->> 'productName' as product_name,
+    (item.value ->> 'qty')::integer as quantity,
+    (item.value ->> 'unitPrice')::numeric(18, 2) as unit_price,
+    ((item.value ->> 'qty')::integer * (item.value ->> 'unitPrice')::numeric(18, 2))::numeric(18, 2) as line_total
+from {{ ref('stg_orders') }} as orders
+cross join lateral jsonb_array_elements(orders.items) as item(value)

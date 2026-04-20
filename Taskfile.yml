@@ -1,18 +1,17 @@
-# https://taskfile.dev
 version: "3"
 
 vars:
-  CLICKHOUSE_PASSWORD: clickhouse
+  PGHOST: localhost
+  PGPORT: 5432
+  PGUSER: pipeline
+  PGPASSWORD: pipeline
+  PGDATABASE: warehouse
 
 tasks:
-  # ===========================================================================
-  # Infrastructure
-  # ===========================================================================
   up:
-    desc: Start all services
+    desc: Start MongoDB, TimescaleDB, Orders API, and Airflow
     cmds:
       - docker compose up -d
-      - task: wait-healthy
 
   down:
     desc: Stop all services
@@ -24,61 +23,32 @@ tasks:
     cmds:
       - docker compose down -v
 
-  wait-healthy:
-    desc: Wait for services to be healthy
+  db-init:
+    desc: Initialize TimescaleDB schemas and raw tables
     cmds:
-      - echo "Waiting for services..."
-      - docker compose ps --format json | jq -r '.[].State' | sort | uniq -c
-    silent: true
-
-  # ===========================================================================
-  # Seed and Init
-  # ===========================================================================
-  init-clickhouse:
-    desc: Create ClickHouse databases
-    cmds:
-      - docker exec -i clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} < scripts/init-clickhouse.sql
+      - psql -h {{.PGHOST}} -p {{.PGPORT}} -U {{.PGUSER}} -d {{.PGDATABASE}} -f scripts/init-timescaledb.sql
+    env:
+      PGPASSWORD: "{{.PGPASSWORD}}"
 
   seed-check:
-    desc: Verify DocumentDB was seeded by the Orders API
+    desc: Verify MongoDB seed data
     cmds:
-      - curl -sf http://localhost:5100/api/orders?limit=3 | jq
-      - curl -sf http://localhost:5100/api/customers?limit=3 | jq
-      - curl -sf http://localhost:5100/api/orders/revenue/daily?days=30 | jq '.[0:3]'
+      - curl -sf http://localhost:5100/api/orders?limit=2
+      - curl -sf http://localhost:5100/api/customers?limit=2
 
-  # ===========================================================================
-  # Terraform (Airbyte config)
-  # ===========================================================================
-  tf-init:
-    desc: Initialize Terraform
-    dir: infra
+  ingest:
+    desc: Load MongoDB documents into TimescaleDB raw schema
     cmds:
-      - terraform init
+      - python scripts/ingest_mongo_to_timescale.py
+    env:
+      MONGO_CONNECTION_STRING: mongodb://localhost:27017
+      MONGO_DATABASE: ecommerce
+      PGHOST: "{{.PGHOST}}"
+      PGPORT: "{{.PGPORT}}"
+      PGUSER: "{{.PGUSER}}"
+      PGPASSWORD: "{{.PGPASSWORD}}"
+      PGDATABASE: "{{.PGDATABASE}}"
 
-  tf-plan:
-    desc: Plan Airbyte configuration changes
-    dir: infra
-    cmds:
-      - terraform plan
-
-  tf-apply:
-    desc: Apply Airbyte configuration
-    dir: infra
-    cmds:
-      - terraform apply -auto-approve
-
-  tf-lint:
-    desc: Lint Terraform files
-    dir: infra
-    cmds:
-      - terraform fmt -check -recursive -diff
-      - terraform validate
-      - tflint --init
-      - tflint --format compact
-
-  # ===========================================================================
-  # dbt
-  # ===========================================================================
   dbt-deps:
     desc: Install dbt packages
     dir: dbt
@@ -89,75 +59,94 @@ tasks:
     desc: Run dbt models and tests
     dir: dbt
     cmds:
-      - dbt build --profiles-dir .
+      - dbt build --profiles-dir . --target dev
+    env:
+      PGHOST: "{{.PGHOST}}"
+      PGPORT: "{{.PGPORT}}"
+      PGUSER: "{{.PGUSER}}"
+      PGPASSWORD: "{{.PGPASSWORD}}"
+      PGDATABASE: "{{.PGDATABASE}}"
 
-  dbt-test:
-    desc: Run dbt tests only
+  dbt-freshness:
+    desc: Run dbt source freshness checks
     dir: dbt
     cmds:
-      - dbt test --profiles-dir .
+      - dbt source freshness --profiles-dir . --target dev
+    env:
+      PGHOST: "{{.PGHOST}}"
+      PGPORT: "{{.PGPORT}}"
+      PGUSER: "{{.PGUSER}}"
+      PGPASSWORD: "{{.PGPASSWORD}}"
+      PGDATABASE: "{{.PGDATABASE}}"
 
-  dbt-docs:
-    desc: Generate and serve dbt documentation
-    dir: dbt
+  collect-dbt-evidence:
+    desc: Package dbt failure artifacts for AI triage
     cmds:
-      - dbt docs generate --profiles-dir .
-      - dbt docs serve --profiles-dir .
+      - python scripts/collect_failure_evidence.py
 
-  # ===========================================================================
-  # Pipeline test (local, simulates CI)
-  # ===========================================================================
+  collect-runtime-evidence:
+    desc: Package Airflow runtime failure evidence for AI triage
+    cmds:
+      - python scripts/collect_runtime_failure_evidence.py
+    env:
+      PGHOST: "{{.PGHOST}}"
+      PGPORT: "{{.PGPORT}}"
+      PGUSER: "{{.PGUSER}}"
+      PGPASSWORD: "{{.PGPASSWORD}}"
+      PGDATABASE: "{{.PGDATABASE}}"
+      MONGO_CONNECTION_STRING: mongodb://localhost:27017
+      MONGO_DATABASE: ecommerce
+
+  collect-infra-evidence:
+    desc: Package Terraform failure evidence for AI triage
+    cmds:
+      - python scripts/collect_infra_failure_evidence.py
+
+  infra-init:
+    desc: Initialize Terraform for TimescaleDB management
+    dir: infra
+    cmds:
+      - terraform init
+
+  infra-plan:
+    desc: Run Terraform plan against local TimescaleDB
+    dir: infra
+    cmds:
+      - terraform plan
+
+  infra-apply:
+    desc: Apply Terraform to local TimescaleDB
+    dir: infra
+    cmds:
+      - terraform apply -auto-approve
+
+  validate:
+    desc: Query marts in TimescaleDB
+    cmds:
+      - psql -h {{.PGHOST}} -p {{.PGPORT}} -U {{.PGUSER}} -d {{.PGDATABASE}} -c "select count(*) as order_lines from marts.fct_order_lines;"
+      - psql -h {{.PGHOST}} -p {{.PGPORT}} -U {{.PGUSER}} -d {{.PGDATABASE}} -c "select count(*) as customers, round(sum(lifetime_value_usd), 2) as total_ltv from marts.dim_customers;"
+      - psql -h {{.PGHOST}} -p {{.PGPORT}} -U {{.PGUSER}} -d {{.PGDATABASE}} -c "select count(*) as revenue_rows, round(sum(revenue_usd), 2) as total_revenue_usd from marts.fct_daily_revenue;"
+    env:
+      PGPASSWORD: "{{.PGPASSWORD}}"
+
   test-pipeline:
-    desc: Run the full pipeline integration test locally
+    desc: Run the minimal local pipeline end to end
     cmds:
       - task: up
-      - task: init-clickhouse
-      - echo "Loading test data into ClickHouse raw tables..."
-      - docker exec -i clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} --queries-file /dev/stdin < scripts/testdata/create-raw-tables.sql
-      - docker exec -i clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} --queries-file /dev/stdin < scripts/testdata/seed-raw-orders.sql
-      - docker exec -i clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} --queries-file /dev/stdin < scripts/testdata/seed-raw-customers.sql
-      - docker exec -i clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} --queries-file /dev/stdin < scripts/testdata/seed-raw-crypto-prices.sql
+      - task: db-init
+      - task: seed-check
+      - task: ingest
       - task: dbt-deps
+      - task: dbt-freshness
       - task: dbt-build
       - task: validate
 
-  validate:
-    desc: Validate analytical output in ClickHouse
-    cmds:
-      - echo "=== fct_order_lines ==="
-      - docker exec clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} --query "SELECT count() as rows, round(sum(line_total_usd), 2) as total_usd FROM analytics.fct_order_lines WHERE order_status = 'completed'"
-      - echo "=== dim_customers ==="
-      - docker exec clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} --query "SELECT count() as customers, round(sum(lifetime_value_usd), 2) as total_ltv FROM analytics.dim_customers"
-      - echo "=== Crypto enrichment ==="
-      - docker exec clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} --query "SELECT currency, count() as lines, round(avg(line_total_usd), 2) as avg_usd FROM analytics.fct_order_lines WHERE currency IN ('BTC', 'ETH') GROUP BY currency"
-      - echo "=== Duplicate check ==="
-      - docker exec clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} --query "SELECT count() FROM (SELECT order_id, sku, count() as c FROM analytics.fct_order_lines GROUP BY order_id, sku HAVING c > 1)"
-
-  # ===========================================================================
-  # Quality
-  # ===========================================================================
   lint:
-    desc: Run all linters
+    desc: Validate compose and Dockerfiles
     cmds:
-      - task: tf-lint
       - docker compose config --quiet
-      - echo "All lints passed."
 
-  query:
-    desc: Run sample analytical queries
-    cmds:
-      - docker exec -i clickhouse clickhouse-client --password {{.CLICKHOUSE_PASSWORD}} < scripts/sample-queries.sql
-
-  # ===========================================================================
-  # Full setup (first time)
-  # ===========================================================================
   setup:
-    desc: First-time setup. Starts infra, seeds data, configures Airbyte, runs dbt.
+    desc: First-time setup for the self-healing pipeline demo
     cmds:
-      - task: up
-      - task: init-clickhouse
-      - task: tf-init
-      - task: tf-apply
-      - task: dbt-deps
-      - task: dbt-build
-      - echo "Pipeline ready. Open http://localhost:3000 for Dagster, http://localhost:8000 for Airbyte."
+      - task: test-pipeline

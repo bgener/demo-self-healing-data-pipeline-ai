@@ -4,9 +4,9 @@ using OrdersApi.Services;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-// DocumentDB connection (MongoDB-compatible)
+// MongoDB connection
 string connectionString = builder.Configuration["DocumentDb:ConnectionString"]
-    ?? "mongodb://docdbadmin:Passw0rd!@localhost:10260/?authMechanism=SCRAM-SHA-256";
+    ?? "mongodb://localhost:27017";
 string databaseName = builder.Configuration["DocumentDb:DatabaseName"] ?? "ecommerce";
 
 MongoClient mongoClient = new(connectionString);

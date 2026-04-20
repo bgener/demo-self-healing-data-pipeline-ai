@@ -5,7 +5,7 @@ using OrdersApi.Models;
 namespace OrdersApi.Services;
 
 /// <summary>
-/// Demonstrates real MongoDB aggregation pipelines running on DocumentDB.
+/// Demonstrates real MongoDB aggregation pipelines on the operational source database.
 /// This is the kind of query the source database handles natively:
 /// $unwind nested items, $group by date and currency, $sort by date.
 /// The ELT pipeline complements this by enriching with external data
@@ -30,7 +30,7 @@ public class RevenueAggregationService
 
         DateTime cutoff = DateTime.UtcNow.AddDays(-days);
 
-        // MongoDB aggregation pipeline running on DocumentDB
+        // MongoDB aggregation pipeline running on the source database
         PipelineDefinition<Order, BsonDocument> pipeline = new BsonDocument[]
         {
             // Stage 1: Filter to completed orders within the date range

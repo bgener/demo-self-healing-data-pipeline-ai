@@ -15,9 +15,9 @@ dbt/target/
 dbt/dbt_packages/
 dbt/logs/
 
-# Dagster
-dagster/dagster_home/
-dagster/storage/
+# Pipeline artifacts
+artifacts/*
+!artifacts/.gitkeep
 
 # Terraform
 infra/.terraform/
@@ -26,10 +26,6 @@ infra/terraform.tfstate
 infra/terraform.tfstate.backup
 infra/*.tfvars
 !infra/*.tfvars.example
-
-# Docker volumes
-clickhouse-data/
-airbyte-data/
 
 # IDE
 .vs/

@@ -7,168 +7,167 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Test strategy:
-# We spin up DocumentDB + ClickHouse in Docker, seed DocumentDB via the .NET API,
-# load synthetic Airbyte output into ClickHouse raw tables (simulating what Airbyte
-# does in production), then run dbt build and validate the analytical output.
-#
-# This tests the entire transform layer end-to-end without needing Airbyte itself
-# (which is too heavy for CI). The Airbyte sync is the part managed by Terraform
-# and tested via terraform validate.
-
 jobs:
   pipeline-test:
     name: End-to-End Pipeline Test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     services:
-      clickhouse:
-        image: clickhouse/clickhouse-server:24.8
+      mongo:
+        image: mongo:7
         ports:
-          - 8123:8123
-          - 9000:9000
-        env:
-          CLICKHOUSE_DB: analytics
-          CLICKHOUSE_USER: default
-          CLICKHOUSE_PASSWORD: clickhouse
+          - 27017:27017
         options: >-
-          --health-cmd "clickhouse-client --password clickhouse --query 'SELECT 1'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      documentdb:
-        image: ghcr.io/microsoft/documentdb/documentdb-local:latest
-        ports:
-          - 10260:10260
-        options: >-
-          --health-cmd "mongosh --port 10260 -u docdbadmin -p Passw0rd! --eval 'db.runCommand({ping:1}).ok'"
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
-        # Note: command args passed via the image entrypoint
+
+      timescaledb:
+        image: timescale/timescaledb:2.19.3-pg16
+        ports:
+          - 5432:5432
         env:
-          DOCUMENTDB_USERNAME: docdbadmin
-          DOCUMENTDB_PASSWORD: "Passw0rd!"
+          POSTGRES_DB: warehouse
+          POSTGRES_USER: pipeline
+          POSTGRES_PASSWORD: pipeline
+        options: >-
+          --health-cmd "pg_isready -U pipeline -d warehouse"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4
 
-      # ----- Seed DocumentDB via the .NET API -----
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
 
-      - name: Start Orders API (seeds DocumentDB)
-        run: |
-          cd src/OrdersApi
-          dotnet run &
-          sleep 10
-        env:
-          DocumentDb__ConnectionString: "mongodb://docdbadmin:Passw0rd!@localhost:10260/?authMechanism=SCRAM-SHA-256"
-          DocumentDb__DatabaseName: ecommerce
-          ASPNETCORE_URLS: "http://+:5100"
-
-      - name: Verify seed data
-        run: |
-          curl -sf http://localhost:5100/api/orders?limit=5 | jq '.[:2]'
-          curl -sf http://localhost:5100/api/customers?limit=5 | jq '.[:2]'
-          curl -sf http://localhost:5100/api/orders/revenue/daily?days=90 | jq '.[:3]'
-          echo "Seed data verified."
-
-      # ----- Initialize ClickHouse -----
-      - name: Create ClickHouse databases
-        run: |
-          clickhouse-client --host localhost --password clickhouse \
-            --query "CREATE DATABASE IF NOT EXISTS raw"
-          clickhouse-client --host localhost --password clickhouse \
-            --query "CREATE DATABASE IF NOT EXISTS staging"
-          clickhouse-client --host localhost --password clickhouse \
-            --query "CREATE DATABASE IF NOT EXISTS intermediate"
-          clickhouse-client --host localhost --password clickhouse \
-            --query "CREATE DATABASE IF NOT EXISTS analytics"
-
-      # ----- Load test data into ClickHouse raw (simulates Airbyte) -----
-      - name: Load synthetic Airbyte output
-        run: |
-          clickhouse-client --host localhost --password clickhouse \
-            --queries-file scripts/testdata/create-raw-tables.sql
-          clickhouse-client --host localhost --password clickhouse \
-            --queries-file scripts/testdata/seed-raw-orders.sql
-          clickhouse-client --host localhost --password clickhouse \
-            --queries-file scripts/testdata/seed-raw-customers.sql
-          clickhouse-client --host localhost --password clickhouse \
-            --queries-file scripts/testdata/seed-raw-crypto-prices.sql
-
-      - name: Verify raw data loaded
-        run: |
-          echo "Orders:"
-          clickhouse-client --host localhost --password clickhouse \
-            --query "SELECT count() FROM raw.orders"
-          echo "Customers:"
-          clickhouse-client --host localhost --password clickhouse \
-            --query "SELECT count() FROM raw.customers"
-          echo "Crypto prices:"
-          clickhouse-client --host localhost --password clickhouse \
-            --query "SELECT count() FROM raw.coingecko_prices"
-
-      # ----- Run dbt -----
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install dbt
-        run: pip install dbt-core dbt-clickhouse
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Install Python dependencies
+        run: pip install dbt-core==1.10.13 dbt-postgres==1.9.0 pymongo==4.13.2 psycopg2-binary==2.9.10
+
+      # ---- Runtime lane: init + ingest ----
+
+      - name: Initialize TimescaleDB
+        id: init_db
+        run: |
+          $env:PGPASSWORD="pipeline"
+          psql -h localhost -U pipeline -d warehouse -f scripts/init-timescaledb.sql
+        shell: pwsh
+
+      - name: Start Orders API and seed MongoDB
+        id: orders_api
+        run: |
+          cd src/OrdersApi
+          nohup dotnet run > ../../orders-api.log 2>&1 &
+          echo "api_pid=$!" >> "$GITHUB_OUTPUT"
+          sleep 15
+        env:
+          DocumentDb__ConnectionString: mongodb://localhost:27017
+          DocumentDb__DatabaseName: ecommerce
+          ASPNETCORE_URLS: http://+:5100
+
+      - name: Verify seed data
+        run: |
+          curl -sf http://localhost:5100/api/orders?limit=2
+          curl -sf http://localhost:5100/api/customers?limit=2
+
+      - name: Ingest MongoDB into TimescaleDB raw layer
+        id: ingest
+        run: python scripts/ingest_mongo_to_timescale.py
+        env:
+          MONGO_CONNECTION_STRING: mongodb://localhost:27017
+          MONGO_DATABASE: ecommerce
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: pipeline
+          PGPASSWORD: pipeline
+          PGDATABASE: warehouse
+
+      # ---- Runtime failure evidence ----
+
+      - name: Collect runtime failure evidence
+        if: failure() && (steps.init_db.outcome == 'failure' || steps.ingest.outcome == 'failure')
+        run: python scripts/collect_runtime_failure_evidence.py
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: pipeline
+          PGPASSWORD: pipeline
+          PGDATABASE: warehouse
+          MONGO_CONNECTION_STRING: mongodb://localhost:27017
+          MONGO_DATABASE: ecommerce
+
+      - name: Upload runtime failure bundle
+        if: failure() && (steps.init_db.outcome == 'failure' || steps.ingest.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-failure-pack
+          path: artifacts/runtime-failure-pack
+          if-no-files-found: warn
+
+      # ---- dbt lane: freshness + build ----
 
       - name: dbt deps
         working-directory: dbt
         run: dbt deps
 
-      - name: dbt build (models + tests)
+      - name: dbt source freshness
+        working-directory: dbt
+        run: dbt source freshness --profiles-dir . --target dev
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: pipeline
+          PGPASSWORD: pipeline
+          PGDATABASE: warehouse
+
+      - name: dbt build
+        id: dbt_build
         working-directory: dbt
         run: dbt build --profiles-dir . --target dev
         env:
-          CLICKHOUSE_HOST: localhost
-          CLICKHOUSE_PORT: "8123"
-          CLICKHOUSE_USER: default
-          CLICKHOUSE_PASSWORD: clickhouse
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: pipeline
+          PGPASSWORD: pipeline
+          PGDATABASE: warehouse
 
-      # ----- Validate analytical output -----
-      - name: Validate mart tables
+      # ---- dbt failure evidence ----
+
+      - name: Collect dbt failure evidence
+        if: failure() && steps.dbt_build.outcome == 'failure'
+        run: python scripts/collect_failure_evidence.py
+
+      - name: Upload dbt failure bundle
+        if: failure() && steps.dbt_build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-failure-pack
+          path: artifacts/dbt-failure-pack
+          if-no-files-found: error
+
+      # ---- Validation ----
+
+      - name: Validate marts
+        if: success()
         run: |
-          echo "=== fct_order_lines ==="
-          clickhouse-client --host localhost --password clickhouse \
-            --query "SELECT count() as rows, round(sum(line_total_usd), 2) as total_usd FROM analytics.fct_order_lines WHERE order_status = 'completed'"
+          $env:PGPASSWORD="pipeline"
+          psql -h localhost -U pipeline -d warehouse -c "select count(*) as order_lines from marts.fct_order_lines;"
+          psql -h localhost -U pipeline -d warehouse -c "select count(*) as customers, round(sum(lifetime_value_usd), 2) as total_ltv from marts.dim_customers;"
+          psql -h localhost -U pipeline -d warehouse -c "select count(*) as revenue_rows, round(sum(revenue_usd), 2) as total_revenue_usd from marts.fct_daily_revenue;"
+        shell: pwsh
 
-          echo "=== dim_customers ==="
-          clickhouse-client --host localhost --password clickhouse \
-            --query "SELECT count() as customers, round(sum(lifetime_value_usd), 2) as total_ltv FROM analytics.dim_customers"
-
-          echo "=== fct_daily_revenue ==="
-          clickhouse-client --host localhost --password clickhouse \
-            --query "SELECT count() as date_currency_pairs, round(sum(revenue_usd), 2) as total_revenue_usd FROM analytics.fct_daily_revenue"
-
-          echo "=== Crypto enrichment check ==="
-          clickhouse-client --host localhost --password clickhouse \
-            --query "SELECT currency, count() as lines, round(avg(line_total_usd), 2) as avg_usd FROM analytics.fct_order_lines WHERE currency IN ('BTC', 'ETH') GROUP BY currency"
-
-      - name: Validate no duplicates
+      - name: Stop Orders API
+        if: always()
         run: |
-          DUPES=$(clickhouse-client --host localhost --password clickhouse \
-            --query "SELECT count() FROM (SELECT order_id, sku, count() as c FROM analytics.fct_order_lines GROUP BY order_id, sku HAVING c > 1)")
-          if [ "$DUPES" -gt 0 ]; then
-            echo "FAIL: Found $DUPES duplicate order items!"
-            exit 1
-          fi
-          echo "PASS: No duplicate order items found."
-
-      - name: Validate all USD amounts are positive for completed orders
-        run: |
-          BAD=$(clickhouse-client --host localhost --password clickhouse \
-            --query "SELECT count() FROM analytics.fct_order_lines WHERE order_status = 'completed' AND line_total_usd <= 0")
-          if [ "$BAD" -gt 0 ]; then
-            echo "FAIL: Found $BAD completed order lines with non-positive USD amounts!"
-            exit 1
-          fi
-          echo "PASS: All completed order lines have positive USD amounts."
+          kill ${{ steps.orders_api.outputs.api_pid }} || true

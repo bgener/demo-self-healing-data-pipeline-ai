@@ -1,9 +1,9 @@
-output "documentdb_connection_id" {
-  description = "Airbyte connection ID for DocumentDB sync (set as AIRBYTE_ORDERS_CONNECTION_ID)"
-  value       = airbyte_connection.documentdb_to_clickhouse.connection_id
+output "schemas" {
+  description = "Managed warehouse schemas"
+  value       = [for s in postgresql_schema.pipeline : s.name]
 }
 
-output "coingecko_connection_id" {
-  description = "Airbyte connection ID for CoinGecko sync (set as AIRBYTE_COINGECKO_CONNECTION_ID)"
-  value       = airbyte_connection.coingecko_to_clickhouse.connection_id
+output "timescaledb_extension" {
+  description = "TimescaleDB extension status"
+  value       = postgresql_extension.timescaledb.name
 }

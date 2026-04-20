@@ -1,128 +1,179 @@
 services:
-  # =============================================================================
-  # Source: Microsoft DocumentDB (MongoDB-compatible)
-  # =============================================================================
-  documentdb:
-    image: ghcr.io/microsoft/documentdb/documentdb-local:latest
-    container_name: documentdb
+  mongo:
+    image: mongo:7
+    container_name: shdp-mongo
     ports:
-      - "10260:10260"
-    command: ["--username", "docdbadmin", "--password", "Passw0rd!"]
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--port", "10260", "-u", "docdbadmin", "-p", "Passw0rd!", "--eval", "db.runCommand({ping:1}).ok"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
       interval: 10s
       timeout: 5s
       retries: 10
     networks:
-      - elt-network
+      - pipeline
 
-  # =============================================================================
-  # Destination: ClickHouse (columnar analytics)
-  # =============================================================================
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.8
-    container_name: clickhouse
+  timescaledb:
+    image: timescale/timescaledb:2.19.3-pg16
+    container_name: shdp-timescaledb
     ports:
-      - "8123:8123"   # HTTP interface
-      - "9000:9000"   # Native TCP
+      - "5432:5432"
     environment:
-      CLICKHOUSE_DB: analytics
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: clickhouse
+      POSTGRES_DB: warehouse
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline
     volumes:
-      - clickhouse-data:/var/lib/clickhouse
+      - timescaledb-data:/var/lib/postgresql/data
+      - ./scripts/init-timescaledb.sql:/docker-entrypoint-initdb.d/001-init-timescaledb.sql
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--password", "clickhouse", "--query", "SELECT 1"]
+      test: ["CMD-SHELL", "pg_isready -U pipeline -d warehouse"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
     networks:
-      - elt-network
+      - pipeline
 
-  # =============================================================================
-  # .NET Orders API (seeds DocumentDB)
-  # =============================================================================
   orders-api:
     build:
       context: ./src/OrdersApi
       dockerfile: Dockerfile
-    container_name: orders-api
+    container_name: shdp-orders-api
     ports:
       - "5100:8080"
     environment:
-      DocumentDb__ConnectionString: "mongodb://docdbadmin:Passw0rd!@documentdb:10260/?authMechanism=SCRAM-SHA-256"
+      DocumentDb__ConnectionString: "mongodb://mongo:27017"
       DocumentDb__DatabaseName: "ecommerce"
+      ASPNETCORE_ENVIRONMENT: "Development"
     depends_on:
-      documentdb:
+      mongo:
         condition: service_healthy
     networks:
-      - elt-network
+      - pipeline
 
-  # =============================================================================
-  # Airbyte (OSS - data integration)
-  # =============================================================================
-  airbyte-server:
-    image: airbyte/airbyte:latest
-    container_name: airbyte
-    ports:
-      - "8000:8000"   # Airbyte webapp
-    volumes:
-      - airbyte-data:/tmp/workspace
+  airflow-db:
+    image: postgres:16
+    container_name: shdp-airflow-db
     environment:
-      - DATABASE_URL=
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
-      - elt-network
+      - pipeline
 
-  # =============================================================================
-  # Dagster (orchestration)
-  # =============================================================================
-  dagster-webserver:
+  airflow-init:
     build:
-      context: ./dagster
+      context: ./airflow
       dockerfile: Dockerfile
-    container_name: dagster-webserver
-    command: dagster-webserver -h 0.0.0.0 -p 3000
-    ports:
-      - "3000:3000"
-    environment:
-      DAGSTER_HOME: /opt/dagster/dagster_home
-      AIRBYTE_HOST: http://airbyte-server:8000
-      CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_PORT: "8123"
-      DBT_PROJECT_DIR: /opt/dagster/dbt
-    volumes:
-      - ./dagster/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml
-      - ./dbt:/opt/dagster/dbt
+    container_name: shdp-airflow-init
     depends_on:
-      - clickhouse
-      - airbyte-server
+      airflow-db:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      PGHOST: timescaledb
+      PGPORT: 5432
+      PGUSER: pipeline
+      PGPASSWORD: pipeline
+      PGDATABASE: warehouse
+      MONGO_CONNECTION_STRING: "mongodb://mongo:27017"
+      MONGO_DATABASE: ecommerce
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./dbt:/opt/airflow/dbt
+      - ./scripts:/opt/airflow/scripts
+      - ./artifacts:/opt/airflow/artifacts
+    command: >
+      bash -lc "airflow db migrate &&
+      airflow users create
+      --username admin
+      --firstname Admin
+      --lastname User
+      --role Admin
+      --email admin@example.com
+      --password admin || true"
     networks:
-      - elt-network
+      - pipeline
 
-  dagster-daemon:
+  airflow-webserver:
     build:
-      context: ./dagster
+      context: ./airflow
       dockerfile: Dockerfile
-    container_name: dagster-daemon
-    command: dagster-daemon run
-    environment:
-      DAGSTER_HOME: /opt/dagster/dagster_home
-      AIRBYTE_HOST: http://airbyte-server:8000
-      CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_PORT: "8123"
-      DBT_PROJECT_DIR: /opt/dagster/dbt
-    volumes:
-      - ./dagster/dagster.yaml:/opt/dagster/dagster_home/dagster.yaml
-      - ./dbt:/opt/dagster/dbt
+    container_name: shdp-airflow-webserver
     depends_on:
-      - dagster-webserver
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      PGHOST: timescaledb
+      PGPORT: 5432
+      PGUSER: pipeline
+      PGPASSWORD: pipeline
+      PGDATABASE: warehouse
+      MONGO_CONNECTION_STRING: "mongodb://mongo:27017"
+      MONGO_DATABASE: ecommerce
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./dbt:/opt/airflow/dbt
+      - ./scripts:/opt/airflow/scripts
+      - ./artifacts:/opt/airflow/artifacts
+    command: webserver
+    ports:
+      - "8080:8080"
     networks:
-      - elt-network
+      - pipeline
+
+  airflow-scheduler:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    container_name: shdp-airflow-scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      PGHOST: timescaledb
+      PGPORT: 5432
+      PGUSER: pipeline
+      PGPASSWORD: pipeline
+      PGDATABASE: warehouse
+      MONGO_CONNECTION_STRING: "mongodb://mongo:27017"
+      MONGO_DATABASE: ecommerce
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./dbt:/opt/airflow/dbt
+      - ./scripts:/opt/airflow/scripts
+      - ./artifacts:/opt/airflow/artifacts
+    command: scheduler
+    networks:
+      - pipeline
 
 volumes:
-  clickhouse-data:
-  airbyte-data:
+  mongo-data:
+  timescaledb-data:
+  airflow-db-data:
 
 networks:
-  elt-network:
+  pipeline:
     driver: bridge

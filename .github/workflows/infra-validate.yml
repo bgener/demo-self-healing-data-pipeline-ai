@@ -1,0 +1,76 @@
+name: Infrastructure Validation
+
+on:
+  push:
+    branches: [main]
+    paths: ["infra/**"]
+  pull_request:
+    paths: ["infra/**"]
+  workflow_dispatch:
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.19.3-pg16
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: warehouse
+          POSTGRES_USER: pipeline
+          POSTGRES_PASSWORD: pipeline
+        options: >-
+          --health-cmd "pg_isready -U pipeline -d warehouse"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform Plan
+        id: tf_plan
+        working-directory: infra
+        run: terraform plan -detailed-exitcode -no-color 2>&1 | tee /tmp/plan_output.txt
+        continue-on-error: true
+        env:
+          TF_VAR_pg_host: localhost
+          TF_VAR_pg_password: pipeline
+
+      - name: Terraform Apply
+        if: steps.tf_plan.outcome == 'success'
+        working-directory: infra
+        run: terraform apply -auto-approve -no-color
+        env:
+          TF_VAR_pg_host: localhost
+          TF_VAR_pg_password: pipeline
+
+      - name: Collect infra failure evidence
+        if: steps.tf_plan.outcome == 'failure'
+        run: python scripts/collect_infra_failure_evidence.py
+        env:
+          TF_PLAN_OUTPUT: ${{ steps.tf_plan.outputs.stdout }}
+          PGHOST: localhost
+          PGPASSWORD: pipeline
+
+      - name: Upload infra failure bundle
+        if: steps.tf_plan.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-failure-pack
+          path: artifacts/infra-failure-pack
+          if-no-files-found: error

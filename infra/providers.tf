@@ -1,4 +1,8 @@
-provider "airbyte" {
-  # Points to local Airbyte OSS instance started by docker compose
-  server_url = var.airbyte_url
+provider "postgresql" {
+  host     = var.pg_host
+  port     = var.pg_port
+  username = var.pg_user
+  password = var.pg_password
+  database = var.pg_database
+  sslmode  = "disable"
 }

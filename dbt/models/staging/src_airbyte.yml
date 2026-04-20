@@ -1,54 +1,13 @@
 version: 2
 
 sources:
-  - name: airbyte_raw
-    description: Raw data loaded by Airbyte from DocumentDB and CoinGecko
+  - name: raw
     schema: raw
     tables:
       - name: orders
-        description: Raw orders from DocumentDB (nested JSON documents)
-        columns:
-          - name: _airbyte_raw_id
-            description: Airbyte-generated unique row ID
-          - name: _airbyte_extracted_at
-            description: Timestamp when Airbyte extracted this record
-          - name: orderId
-            description: Business order identifier
-          - name: customerId
-            description: Reference to the customer
-          - name: status
-            description: Order status (completed, pending, cancelled)
-          - name: currency
-            description: Payment currency (USD, EUR, GBP, BTC, ETH)
-          - name: items
-            description: Nested JSON array of order line items
-          - name: shipping
-            description: Nested JSON object with country and method
-          - name: createdAt
-            description: Order creation timestamp
-
+        loaded_at_field: _airbyte_extracted_at
+        freshness:
+          warn_after: {count: 6, period: hour}
+          error_after: {count: 24, period: hour}
       - name: customers
-        description: Raw customers from DocumentDB
-        columns:
-          - name: customerId
-            description: Business customer identifier
-          - name: name
-            description: Customer full name
-          - name: email
-            description: Customer email address
-          - name: country
-            description: ISO country code
-          - name: segment
-            description: Customer segment (enterprise, startup, individual)
-
-      - name: coingecko_prices
-        description: Crypto price snapshots from CoinGecko API
-        columns:
-          - name: id
-            description: Coin identifier (bitcoin, ethereum)
-          - name: symbol
-            description: Coin symbol (btc, eth)
-          - name: current_price
-            description: Current price in USD
-          - name: last_updated
-            description: Price snapshot timestamp
+        loaded_at_field: _airbyte_extracted_at

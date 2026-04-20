@@ -1,0 +1,6 @@
+pg_host     = "localhost"
+pg_port     = 5432
+pg_user     = "pipeline"
+pg_password = "pipeline"
+pg_database = "warehouse"
+pg_schemas  = ["raw", "staging", "intermediate", "marts"]
