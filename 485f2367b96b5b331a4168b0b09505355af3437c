@@ -1,0 +1,51 @@
+Taskfile.yml
+  94aca32e44c604d4 27,29,31
+.github/workflows/infra-validate.yml
+  94aca32e44c604d4 24-25,27,52,60,68-69
+infra/providers.tf
+  94aca32e44c604d4 4-5
+infra/schemas.tf
+  94aca32e44c604d4 9-47
+infra/outputs.tf
+  94aca32e44c604d4 10-14
+.github/workflows/self-heal.md
+  94aca32e44c604d4 5-6,26-30,56-58
+.github/workflows/pipeline-integration.yml
+  94aca32e44c604d4 33-34,36,55-56,60,65-66,69-80
+.github/copilot/mcp.json
+  94aca32e44c604d4 1-12
+README.md
+  94aca32e44c604d4 37-45,52-53,133,136-138,141-143
+.github/prompts/self-heal-infra-failure.prompt.md
+  94aca32e44c604d4 1,3,5,7-19,21-29,31,33-35,42,45-48
+dbt/macros/generate_schema_name.sql
+  94aca32e44c604d4 1-7
+docker-compose.yml
+  94aca32e44c604d4 24-25,30
+scripts/init-timescaledb.sql
+  94aca32e44c604d4 3-11
+infra/variables.tf
+  94aca32e44c604d4 13-14,16,19-20,23-28
+.github/prompts/self-heal-dbt-failure.prompt.md
+  94aca32e44c604d4 5,7,9-23,32,35-38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "485f2367b96b5b331a4168b0b09505355af3437c",
+  "prompts": {
+    "94aca32e44c604d4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "65cdbad2-72f3-4904-86cb-2cf0fd5086b6",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Borys",
+      "messages": [],
+      "total_additions": 422,
+      "total_deletions": 71,
+      "accepted_lines": 411,
+      "overriden_lines": 0
+    }
+  }
+}
