@@ -2,6 +2,8 @@
 engine:
   id: copilot
   model: gpt-5
+  tools:
+    - mcp: terraform
 on:
   workflow_run:
     workflows:
@@ -21,7 +23,11 @@ safe-outputs:
 
 # Self-Heal Pipeline
 
-A CI workflow just failed. Your job is to classify the failure, analyze the evidence, and propose a targeted fix.
+A CI workflow just failed. Your job is to classify the failure, analyze the evidence using the right tools, and propose a targeted fix.
+
+## Available tools
+
+You have access to the **Terraform MCP server** (configured in `.github/copilot/mcp.json`). Use it when investigating infrastructure failures to look up provider documentation and validate resource arguments.
 
 ## Step 1: Download the failure artifacts
 
@@ -47,9 +53,9 @@ Follow the rules in that prompt exactly.
 
 Read every file in the downloaded artifact. Cross-reference the error message with the source code in the repository.
 
-For infra failures: check `infra/*.tf` files.
-For runtime failures: check `scripts/*.py` and `scripts/*.sql` files.
-For dbt failures: check `dbt/models/**/*.sql` and `dbt/tests/**/*.sql` files.
+For infra failures: check `infra/*.tf` files. **Use the Terraform MCP** to look up provider docs for `postgresql_grant`, `postgresql_schema`, and other resources.
+For runtime failures: check `scripts/*.py` and `scripts/*.sql` files. If the error is `permission denied`, the root cause may be in `infra/*.tf` (missing grant). Reclassify to infra lane.
+For dbt failures: check `dbt/models/**/*.sql` and `dbt/tests/**/*.sql` files. Use the structured JSON artifacts (`run_results.json`, `manifest.json`) as primary evidence. If `run_results.json` shows `permission denied for schema`, the root cause is in `infra/*.tf`, not in dbt code. Reclassify to infra lane.
 
 ## Step 4: Decide and act
 

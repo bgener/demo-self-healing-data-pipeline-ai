@@ -30,10 +30,10 @@ jobs:
           - 5432:5432
         env:
           POSTGRES_DB: warehouse
-          POSTGRES_USER: pipeline
-          POSTGRES_PASSWORD: pipeline
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
         options: >-
-          --health-cmd "pg_isready -U pipeline -d warehouse"
+          --health-cmd "pg_isready -U postgres -d warehouse"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -52,17 +52,31 @@ jobs:
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install --yes postgresql-client
 
+      - uses: hashicorp/setup-terraform@v3
+
       - name: Install Python dependencies
         run: pip install dbt-core==1.10.13 dbt-postgres==1.9.0 pymongo==4.13.2 psycopg2-binary==2.9.10
 
-      # ---- Runtime lane: init + ingest ----
+      # ---- Infra lane: schemas + grants ----
 
       - name: Initialize TimescaleDB
         id: init_db
         run: |
-          $env:PGPASSWORD="pipeline"
-          psql -h localhost -U pipeline -d warehouse -f scripts/init-timescaledb.sql
+          $env:PGPASSWORD="postgres"
+          psql -h localhost -U postgres -d warehouse -f scripts/init-timescaledb.sql
         shell: pwsh
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform Apply (grant pipeline role access)
+        id: tf_apply
+        working-directory: infra
+        run: terraform apply -auto-approve -no-color
+        env:
+          TF_VAR_pg_host: localhost
+          TF_VAR_pg_superuser_password: postgres
 
       - name: Start Orders API and seed MongoDB
         id: orders_api

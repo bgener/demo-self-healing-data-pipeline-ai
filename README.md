@@ -34,17 +34,23 @@ Airflow -> init warehouse -> ingest data -> dbt build -> publish results
 
 When something fails, the pipeline collects structured evidence and uploads it as a GitHub Actions artifact. A GitHub Agentic Workflow downloads the artifact, classifies the failure lane, reads the matching AI prompt, and proposes a draft PR.
 
-| Lane | Trigger | Evidence | Prompt |
-|---|---|---|---|
-| **Infra** | Terraform plan/apply fails | `.tf` files + plan output | `self-heal-infra-failure.prompt.md` |
-| **Runtime** | Init or ingest task fails | DB diagnostics + task output | `self-heal-airflow-failure.prompt.md` |
-| **dbt** | dbt build or freshness fails | run_results + manifest + compiled SQL | `self-heal-dbt-failure.prompt.md` |
+Each tool contributes its own AI capability to the diagnosis:
+
+| Lane | Trigger | Evidence | AI Capability | Prompt |
+|---|---|---|---|---|
+| **Infra** | Terraform plan/apply fails | `.tf` files + plan output | Terraform MCP server for provider doc lookups | `self-heal-infra-failure.prompt.md` |
+| **Runtime** | Init or ingest task fails | Live DB diagnostics + task output | Airflow evidence collection with cross-lane routing | `self-heal-airflow-failure.prompt.md` |
+| **dbt** | dbt build or freshness fails | run_results + manifest + compiled SQL | Structured JSON artifacts for programmatic analysis | `self-heal-dbt-failure.prompt.md` |
+
+The Terraform MCP server is configured in `.github/copilot/mcp.json` and referenced in the agentic workflow via `tools: - mcp: terraform`.
 
 ## Project structure
 
 ```text
 .
 ├── .github/
+│   ├── copilot/
+│   │   └── mcp.json                    # Terraform MCP server config
 │   ├── prompts/
 │   │   ├── self-heal-dbt-failure.prompt.md
 │   │   ├── self-heal-infra-failure.prompt.md
@@ -124,13 +130,17 @@ task infra-apply
 
 ### Infra lane
 
-Edit `infra/variables.tf` and change `"raw"` to `"rw"` in `pg_schemas`:
+Edit `infra/schemas.tf` and remove `"staging"` from the `postgresql_grant` resources. For example, add a local that excludes it:
 
 ```hcl
-default = ["rw", "staging", "intermediate", "marts"]
+locals {
+  granted_schemas = ["raw", "intermediate", "marts"]  # "staging" removed
+}
 ```
 
-Run `task infra-plan` to see the failure. Push to a branch to trigger the infra-validate workflow. The agent will see the wrong schema name and propose a fix.
+Then change the grant resources to use `local.granted_schemas` instead of `var.pg_schemas`. Run `task infra-plan` to see the destructive plan. Push to a branch to trigger the infra-validate workflow.
+
+The pipeline fails at dbt with `permission denied for schema staging`. The error looks like a dbt issue, but the root cause is a missing Terraform grant. The agent uses the Terraform MCP server to look up `postgresql_grant` resource docs for the `cyrilgdn/postgresql` provider and traces the fix back to `infra/schemas.tf`.
 
 ### Runtime lane
 

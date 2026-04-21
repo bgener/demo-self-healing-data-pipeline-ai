@@ -24,11 +24,11 @@ tasks:
       - docker compose down -v
 
   db-init:
-    desc: Initialize TimescaleDB schemas and raw tables
+    desc: Initialize TimescaleDB schemas, roles, and raw tables (runs as superuser)
     cmds:
-      - psql -h {{.PGHOST}} -p {{.PGPORT}} -U {{.PGUSER}} -d {{.PGDATABASE}} -f scripts/init-timescaledb.sql
+      - psql -h {{.PGHOST}} -p {{.PGPORT}} -U postgres -d {{.PGDATABASE}} -f scripts/init-timescaledb.sql
     env:
-      PGPASSWORD: "{{.PGPASSWORD}}"
+      PGPASSWORD: postgres
 
   seed-check:
     desc: Verify MongoDB seed data

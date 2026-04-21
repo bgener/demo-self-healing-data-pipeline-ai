@@ -10,16 +10,22 @@ variable "pg_port" {
   default     = 5432
 }
 
-variable "pg_user" {
-  description = "TimescaleDB admin user"
+variable "pg_superuser" {
+  description = "TimescaleDB superuser (owns schemas)"
   type        = string
-  default     = "pipeline"
+  default     = "postgres"
 }
 
-variable "pg_password" {
-  description = "TimescaleDB admin password"
+variable "pg_superuser_password" {
+  description = "TimescaleDB superuser password"
   type        = string
   sensitive   = true
+  default     = "postgres"
+}
+
+variable "pg_user" {
+  description = "Pipeline role (non-superuser, receives grants)"
+  type        = string
   default     = "pipeline"
 }
 

@@ -21,10 +21,10 @@ jobs:
           - 5432:5432
         env:
           POSTGRES_DB: warehouse
-          POSTGRES_USER: pipeline
-          POSTGRES_PASSWORD: pipeline
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
         options: >-
-          --health-cmd "pg_isready -U pipeline -d warehouse"
+          --health-cmd "pg_isready -U postgres -d warehouse"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -49,7 +49,7 @@ jobs:
         continue-on-error: true
         env:
           TF_VAR_pg_host: localhost
-          TF_VAR_pg_password: pipeline
+          TF_VAR_pg_superuser_password: postgres
 
       - name: Terraform Apply
         if: steps.tf_plan.outcome == 'success'
@@ -57,7 +57,7 @@ jobs:
         run: terraform apply -auto-approve -no-color
         env:
           TF_VAR_pg_host: localhost
-          TF_VAR_pg_password: pipeline
+          TF_VAR_pg_superuser_password: postgres
 
       - name: Collect infra failure evidence
         if: steps.tf_plan.outcome == 'failure'
@@ -65,7 +65,8 @@ jobs:
         env:
           TF_PLAN_OUTPUT: ${{ steps.tf_plan.outputs.stdout }}
           PGHOST: localhost
-          PGPASSWORD: pipeline
+          PGPASSWORD: postgres
+          PGUSER: postgres
 
       - name: Upload infra failure bundle
         if: steps.tf_plan.outcome == 'failure'

@@ -1,5 +1,14 @@
 create extension if not exists timescaledb;
 
+-- Pipeline role (non-superuser). Terraform manages its schema grants.
+do $$
+begin
+  if not exists (select from pg_roles where rolname = 'pipeline') then
+    create role pipeline with login password 'pipeline';
+  end if;
+end
+$$;
+
 create schema if not exists raw;
 create schema if not exists staging;
 create schema if not exists intermediate;

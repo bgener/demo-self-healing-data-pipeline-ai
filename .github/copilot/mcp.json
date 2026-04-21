@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "terraform": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@hashicorp/terraform-mcp-server",
+        "--toolsets=terraform-registry"
+      ]
+    }
+  }
+}

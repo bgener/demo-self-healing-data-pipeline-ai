@@ -21,13 +21,13 @@ services:
       - "5432:5432"
     environment:
       POSTGRES_DB: warehouse
-      POSTGRES_USER: pipeline
-      POSTGRES_PASSWORD: pipeline
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     volumes:
       - timescaledb-data:/var/lib/postgresql/data
       - ./scripts/init-timescaledb.sql:/docker-entrypoint-initdb.d/001-init-timescaledb.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pipeline -d warehouse"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d warehouse"]
       interval: 10s
       timeout: 5s
       retries: 10
